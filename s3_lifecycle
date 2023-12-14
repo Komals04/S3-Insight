@@ -4,6 +4,24 @@ import csv
 import datetime
 import boto3
 
+def naturalsize(value):
+    # A simplified version of the naturalsize() method in the
+    # humanize module: https://pypi.org/project/humanize/
+    decimal_suffixes = ("kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
+
+    base = 1024
+
+    if value == 1:
+        return "1 byte"
+    elif value < base:
+        return "%d bytes" % value
+
+    for i, suffix in enumerate(decimal_suffixes):
+        unit = base ** (i + 2)
+        if value < unit:
+            break
+    return "%.1f %s" % ((base * value / unit), suffix)
+
 def get_bucket_names(s3_client):
     """Returns the name of every bucket in this S3 account."""
     resp = s3_client.list_buckets()
@@ -85,7 +103,7 @@ if __name__ == "__main__":
     bucket_names = get_bucket_names(s3_client)
 
     bucket_sizes = [
-        get_size_of_bucket(s3_client, cloudwatch_client, bucket_name=name) for name in bucket_names
+        get_size_of_bucket(s3_client, cloudwatch_client, bucket_name=name)
     ]
 
     csv_name = write_csv(bucket_sizes)
