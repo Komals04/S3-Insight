@@ -1,41 +1,92 @@
-User
+#!/usr/bin/env python3
 
+import csv
+import datetime
 import boto3
 
-def get_bucket_lifecycle_policies():
-    # Create an S3 client
-    s3 = boto3.client('s3')
+def get_bucket_names(s3_client):
+    """Returns the name of every bucket in this S3 account."""
+    resp = s3_client.list_buckets()
+    return [bucket["Name"] for bucket in resp["Buckets"]]
 
+def get_size_of_bucket(s3_client, cloudwatch_client, *, bucket_name):
+    """
+    Given the name of a bucket, return a rough estimate for the bytes in this
+    bucket per storage class.
+    """
+    # Existing code ...
+
+    # Get the lifecycle configuration for the bucket
     try:
-        # List all S3 buckets in the account
-        response = s3.list_buckets()
-        buckets = response['Buckets']
+        lifecycle_config = s3_client.get_bucket_lifecycle_configuration(Bucket=bucket_name)
+    except s3_client.exceptions.NoSuchLifecycleConfiguration:
+        lifecycle_config = None
 
-        # Iterate through each bucket and retrieve the lifecycle policy
-        for bucket in buckets:
-            bucket_name = bucket['Name']
+    rv["lifecycle_config"] = lifecycle_config
 
-            try:
-                # Get the lifecycle configuration for the bucket
-                response = s3.get_bucket_lifecycle_configuration(Bucket=bucket_name)
-                lifecycle_configuration = response['Rules']
+    return rv
 
-                print(f"Bucket: {bucket_name}")
-                
-                # Print or process the lifecycle policy details
-                for rule in lifecycle_configuration:
-                    print(f"  Rule: {rule}")
+# Modify the write_csv function to include the lifecycle configuration information
+def write_csv(bucket_sizes):
+    now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    csv_name = f"s3_summary_spreadsheet_{now}.csv"
 
-                print()
+    storage_names = [
+        "StandardStorage",
+        "StandardIAStorage",
+        "StandardIASizeOverhead",
+        "ReducedRedundancyStorage",
+        "GlacierStorage",
+        "GlacierObjectOverhead",
+        "GlacierS3ObjectOverhead",
+        "DeepArchiveStorage",
+        "DeepArchiveObjectOverhead",
+        "DeepArchiveS3ObjectOverhead",
+        "DeepArchiveStagingStorage",
+    ]
 
-            except s3.exceptions.NoSuchLifecycleConfiguration:
-                print(f"No lifecycle configuration found for bucket: {bucket_name}")
-            
-            except Exception as e:
-                print(f"Error getting lifecycle configuration for bucket {bucket_name}: {e}")
+    # Add lifecycle configuration fieldnames
+    lifecycle_fieldnames = ["Rules"]
 
-    except Exception as e:
-        print(f"Error listing buckets: {e}")
+    fieldnames = ["bucket name", "number of objects"] + lifecycle_fieldnames
 
-if _name_ == "__main__":
-    get_bucket_lifecycle_policies()
+    for name in storage_names:
+        fieldnames.append(f"{name} (bytes)")
+        fieldnames.append(f"{name} (human-readable)")
+
+    with open(csv_name, "w") as outfile:
+        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for bucket in bucket_sizes:
+            row = {
+                "bucket name": bucket.pop("bucket name"),
+                "number of objects": bucket.pop("number of objects"),
+            }
+
+            # Add lifecycle configuration data to the row
+            lifecycle_config = bucket.pop("lifecycle_config", {})
+            row["Rules"] = lifecycle_config.get("Rules", [])
+
+            for storage_class, byte_count in bucket.items():
+                row[f"{storage_class} (bytes)"] = byte_count
+                row[f"{storage_class} (human-readable)"] = naturalsize(byte_count)
+
+            writer.writerow(row)
+
+    return csv_name
+
+# Existing code ...
+
+if __name__ == "__main__":
+    s3_client = boto3.client("s3")
+    cloudwatch_client = boto3.client("cloudwatch")
+
+    bucket_names = get_bucket_names(s3_client)
+
+    bucket_sizes = [
+        get_size_of_bucket(s3_client, cloudwatch_client, bucket_name=name) for name in bucket_names
+    ]
+
+    csv_name = write_csv(bucket_sizes)
+    print(f"✨ Written a summary of your S3 stats to {csv_name} ✨")
