@@ -1,0 +1,41 @@
+User
+
+import boto3
+
+def get_bucket_lifecycle_policies():
+    # Create an S3 client
+    s3 = boto3.client('s3')
+
+    try:
+        # List all S3 buckets in the account
+        response = s3.list_buckets()
+        buckets = response['Buckets']
+
+        # Iterate through each bucket and retrieve the lifecycle policy
+        for bucket in buckets:
+            bucket_name = bucket['Name']
+
+            try:
+                # Get the lifecycle configuration for the bucket
+                response = s3.get_bucket_lifecycle_configuration(Bucket=bucket_name)
+                lifecycle_configuration = response['Rules']
+
+                print(f"Bucket: {bucket_name}")
+                
+                # Print or process the lifecycle policy details
+                for rule in lifecycle_configuration:
+                    print(f"  Rule: {rule}")
+
+                print()
+
+            except s3.exceptions.NoSuchLifecycleConfiguration:
+                print(f"No lifecycle configuration found for bucket: {bucket_name}")
+            
+            except Exception as e:
+                print(f"Error getting lifecycle configuration for bucket {bucket_name}: {e}")
+
+    except Exception as e:
+        print(f"Error listing buckets: {e}")
+
+if _name_ == "__main__":
+    get_bucket_lifecycle_policies()
