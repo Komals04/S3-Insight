@@ -1,0 +1,188 @@
+import boto3
+import csv
+from datetime import datetime
+from botocore.exceptions import ClientError
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
+def extract_lifecycle_rules(lifecycle_policy, bucket_details):
+    rules = lifecycle_policy.get('Rules', [])
+    extracted_rules = []
+    for rule in rules:
+        rule_data = {
+            'Lifecycle Rule': rule.get('ID', 'Not Configured'),
+            'Status': rule.get('Status', 'Not Configured'),
+            'Expiration': rule.get('Expiration', {}),
+            'NoncurrentVersionExpiration': rule.get('NoncurrentVersionExpiration', {}),
+            'AbortIncompleteMultipartUpload': rule.get('AbortIncompleteMultipartUpload', {})
+        }
+        rule_data.update(bucket_details)
+        extracted_rules.append(rule_data)
+    return extracted_rules
+
+def get_bucket_versioning_status(bucket_name):
+    try:
+        response = s3_client.get_bucket_versioning(Bucket=bucket_name)
+        return response.get('Status', 'NotEnabled')
+    except ClientError as e:
+        return 'NotEnabled'
+
+def get_bucket_encryption_status(bucket_name):
+    try:
+        response = s3_client.get_bucket_encryption(Bucket=bucket_name)
+        return response['ServerSideEncryptionConfiguration']['Rules'][0]['ApplyServerSideEncryptionByDefault']['SSEAlgorithm']
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ServerSideEncryptionConfigurationNotFoundError':
+            return 'Disabled'
+        else:
+            return 'Unknown'
+
+def get_storage_class(bucket_name):
+    try:
+        response = s3_client.list_objects(Bucket=bucket_name)
+        if 'Contents' in response:
+            return response['Contents'][0].get('StorageClass', 'Not Configured')
+        else:
+            return 'Not Configured'
+    except ClientError as e:
+        print(f"Error retrieving storage class for bucket: {bucket_name}: {e}")
+        return 'Not Configured'
+
+def get_intelligent_tiering_configuration(bucket_name):
+    try:
+        response = s3_client.list_bucket_intelligent_tiering_configurations(Bucket=bucket_name)
+        configurations = response.get('IntelligentTieringConfigurationList', [])
+        
+        if configurations:
+            config = configurations[0]
+            return True, config['Id'], config['Tierings'][0]['Days'], config['Tierings'][0]['AccessTier']
+        else:
+            return False, 'Not Configured', 'Not Configured', 'Not Configured'
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchBucket':
+            return False, 'Not Configured', 'Not Configured', 'Not Configured'
+        else:
+            raise
+
+def get_inventory_configuration(bucket_name):
+    try:
+        response = s3_client.list_bucket_inventory_configurations(Bucket=bucket_name)
+        configurations = response.get('InventoryConfigurationList', [])
+        
+        if configurations:
+            config_names = [config.get('Id', 'Not Configured') for config in configurations]
+            return ', '.join(config_names)
+        else:
+            return 'Not Configured'
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchInventoryConfiguration':
+            return 'Not Configured'
+        else:
+            raise
+
+def get_bucket_size_and_objects(bucket_name):
+    try:
+        response = s3_client.list_objects_v2(Bucket=bucket_name)
+        total_size = sum([obj['Size'] for obj in response.get('Contents', [])])
+        total_objects = len(response.get('Contents', []))
+        return total_size, total_objects
+    except ClientError as e:
+        print(f"Error retrieving bucket size and objects for bucket: {bucket_name}: {e}")
+        return 'Not Configured', 'Not Configured'
+
+def process_bucket(bucket):
+    bucket_name = bucket['Name']
+    try:
+        tags_response = s3_client.get_bucket_tagging(Bucket=bucket_name)
+        bucket_tag = tags_response.get('TagSet', 'Not Configured')
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchTagSet':
+            bucket_tag = 'Not Configured'
+        else:
+            raise
+
+    bucket_details = {
+        'BucketName': bucket_name,
+        'VersioningStatus': get_bucket_versioning_status(bucket_name),
+        'BucketTag': bucket_tag,
+        'StorageClassType': get_storage_class(bucket_name),
+        'EncryptionType': get_bucket_encryption_status(bucket_name),
+        'TotalBucketSize': 'Not Configured',
+        'TotalNumberOfObjects': 'Not Configured',
+        'InventoryConfiguration': get_inventory_configuration(bucket_name)
+    }
+
+    total_bucket_size, total_number_of_objects = get_bucket_size_and_objects(bucket_name)
+    bucket_details.update({
+        'TotalBucketSize': total_bucket_size,
+        'TotalNumberOfObjects': total_number_of_objects
+    })
+
+    intelligent_tiering, config_id, tiering_days, access_tier = get_intelligent_tiering_configuration(bucket_name)
+
+    if intelligent_tiering:
+        bucket_details.update({
+            'IntelligentTieringConfigurationList Id': config_id,
+            'DaysUntilTiering': tiering_days,
+            'IntelligentTieringAccessTier': access_tier,
+        })
+
+    try:
+        lifecycle_policy = s3_client.get_bucket_lifecycle_configuration(Bucket=bucket_name)
+        rules = extract_lifecycle_rules(lifecycle_policy, bucket_details)
+
+        for rule in rules:
+            with csv_lock:
+                writer.writerow(rule)
+
+        print(f"Exported details for bucket: {bucket_name}")
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchLifecycleConfiguration':
+            # Handle the case where lifecycle configuration is not defined for the bucket
+            with csv_lock:
+                bucket_details.update({
+                    'Lifecycle Rule': 'Not Configured',
+                    'Status': 'Not Configured',
+                    'Expiration': 'Not Configured',
+                    'NoncurrentVersionExpiration': 'Not Configured',
+                    'AbortIncompleteMultipartUpload': 'Not Configured',
+                })
+                writer.writerow(bucket_details)
+        else:
+            print(f"Error retrieving lifecycle policy for bucket: {bucket_name}: {e}")
+
+def main():
+    start_time = datetime.now()
+
+    global s3_client
+    s3_client = boto3.client('s3')
+
+    buckets_response = s3_client.list_buckets()
+
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    filename = f's3_bucket_details_{timestamp}.csv'
+
+    fieldnames = [
+        'BucketName', 'VersioningStatus', 'BucketTag', 'StorageClassType', 'EncryptionType',
+        'TotalBucketSize', 'TotalNumberOfObjects',
+        'InventoryConfiguration',
+        'IntelligentTieringConfigurationList Id', 'DaysUntilTiering', 'IntelligentTieringAccessTier',
+        'Lifecycle Rule', 'Status', 'Expiration', 'NoncurrentVersionExpiration', 'AbortIncompleteMultipartUpload'
+    ]
+
+    with open(filename, 'w', newline='') as csvfile:
+        global writer, csv_lock
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        csv_lock = threading.Lock()
+        writer.writeheader()
+
+        with ThreadPoolExecutor() as executor:
+            executor.map(process_bucket, buckets_response['Buckets'])
+
+    end_time = datetime.now()
+    total_execution_time = end_time - start_time
+    print(f'Total execution time: {total_execution_time}')
+    print(f'Completed checking and exporting bucket details to {filename}.')
+
+if __name__ == "__main__":
+    main()
