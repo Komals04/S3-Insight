@@ -1,0 +1,101 @@
+import csv
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from typing import List
+
+import boto3
+from botocore.exceptions import NoCredentialsError
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class EC2InstanceInfo:
+    def __init__(self, region, name_tag, instance_state, instance_id, public_ip, vpc_id, subnet_id, cost):
+        self.region = region
+        self.name_tag = name_tag
+        self.instance_state = instance_state
+        self.instance_id = instance_id
+        self.public_ip = public_ip
+        self.vpc_id = vpc_id
+        self.subnet_id = subnet_id
+        self.cost = cost
+
+def fetch_instances_in_region(region_name):
+    ec2_client = boto3.client('ec2', region_name=region_name)
+
+    resp = ec2_client.describe_instances()
+    instances = [
+        instance
+        for reservation in resp['Reservations']
+        for instance in reservation['Instances']
+        if instance.get('PublicIpAddress')
+    ]
+
+    return instances
+
+def get_name_tag_value(tags):
+    for tag in tags:
+        if tag['Key'] == 'Name':
+            return tag['Value']
+    return ''
+
+def fetch_all_instances(regions):
+    all_instances = []
+
+    with ThreadPoolExecutor(max_workers=len(regions)) as executor:
+        for region in regions:
+            executor.submit(fetch_instances_and_append, region, all_instances)
+
+    return all_instances
+
+def fetch_instances_and_append(region, all_instances):
+    try:
+        instances = fetch_instances_in_region(region['RegionName'])
+        logger.info(f"Fetched {len(instances)} instances for region {region['RegionName']}")
+
+        for instance in instances:
+            name_tag = get_name_tag_value(instance.get('Tags', []))
+            inst = EC2InstanceInfo(
+                region=region['RegionName'],
+                name_tag=name_tag,
+                instance_state=instance['State']['Name'],
+                instance_id=instance['InstanceId'],
+                public_ip=instance['PublicIpAddress'],
+                vpc_id=instance['VpcId'],
+                subnet_id=instance['SubnetId'],
+                cost=3.65,
+            )
+
+            all_instances.append(inst)
+
+    except NoCredentialsError as e:
+        logger.error(f"Failed to fetch instances in region {region['RegionName']}: {e}")
+    except Exception as e:
+        logger.exception(f"Unexpected error: {e}")
+
+def write_to_csv(filename, data):
+    fieldnames = [
+        'Region', 'NameTag', 'InstanceState', 'InstanceID',
+        'PublicIP', 'VPCID', 'SubnetID', 'Cost'
+    ]
+
+    with open(filename, 'w', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for instance in data:
+            writer.writerow({
+                'Region': instance.region,
+                'NameTag': instance.name_tag,
+                'InstanceState': instance.instance_state,
+                'InstanceID': instance.instance_id,
+                'PublicIP': instance.public_ip,
+                'VPCID': instance.vpc_id,
+                'SubnetID': instance.subnet_id,
+                'Cost': instance.cost,
+            })
+
+if __name__ == "__main__":
+    regions = boto3.client('ec2').describe_regions()['Regions']
+    all_instances_data = fetch_all_instances(regions)
+    write_to_csv('ec2_instance_info.csv', all_instances_data)
